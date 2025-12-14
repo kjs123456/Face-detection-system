@@ -19,7 +19,7 @@ from rknn.api import RKNN
 
 def load_calibration_data(dataset_path, label_file, max_images=50):
     """
-    加载量化校准数据集
+    加载量化校准数据集，并保存为txt格式供RKNN使用
 
     Args:
         dataset_path: 数据集根目录 (datasets/int_data)
@@ -27,10 +27,10 @@ def load_calibration_data(dataset_path, label_file, max_images=50):
         max_images: 最多使用多少张图片进行校准（默认50张）
 
     Returns:
-        calibration_data: List of numpy arrays (N, 112, 112, 3), RGB, float32, [0-255]
+        dataset_txt_path: 校准数据集路径列表文件（.txt）
     """
     print(f"\n{'='*60}")
-    print("加载量化校准数据集")
+    print("准备量化校准数据集")
     print(f"{'='*60}")
 
     dataset_path = Path(dataset_path)
@@ -59,8 +59,8 @@ def load_calibration_data(dataset_path, label_file, max_images=50):
     else:
         print(f"使用全部 {total_images} 张图片进行校准")
 
-    calibration_data = []
-    valid_count = 0
+    # 收集有效图片路径
+    valid_image_paths = []
 
     for i, line in enumerate(lines):
         parts = line.strip().split()
@@ -72,39 +72,49 @@ def load_calibration_data(dataset_path, label_file, max_images=50):
         img_relative_path = parts[1]
         img_path = str(dataset_path / img_relative_path.replace('casia-webface/', ''))
 
-        try:
-            # 使用cv2读取图像（BGR格式）
-            img = cv2.imread(img_path)
+        # 检查图片是否存在
+        if not os.path.exists(img_path):
+            print(f"警告: 图片不存在 {img_path}")
+            continue
 
+        try:
+            # 验证图片可读取
+            img = cv2.imread(img_path)
             if img is None:
                 print(f"警告: 无法读取图像 {img_path}")
                 continue
 
-            # 检查尺寸是否为112x112
+            # 检查尺寸
             if img.shape[0] != 112 or img.shape[1] != 112:
                 print(f"警告: 图像尺寸不是112x112: {img.shape}, 路径: {img_path}")
-                # 调整尺寸
-                img = cv2.resize(img, (112, 112))
+                continue
 
-            # BGR转RGB
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-            # RKNN需要的格式：uint8, [0-255], RGB, HWC
-            # 注意：RKNN会自动进行归一化，我们在config中配置mean/std
-            calibration_data.append(img)
-            valid_count += 1
+            # 添加到有效列表（使用绝对路径）
+            abs_path = os.path.abspath(img_path)
+            valid_image_paths.append(abs_path)
 
             if (i + 1) % 50 == 0:
-                print(f"  已加载: {i + 1}/{len(lines)} 张图片...")
+                print(f"  已验证: {i + 1}/{len(lines)} 张图片...")
 
         except Exception as e:
-            print(f"警告: 加载图像失败 {img_path}: {e}")
+            print(f"警告: 验证图像失败 {img_path}: {e}")
             continue
 
-    print(f"\n成功加载 {valid_count} 张校准图片")
-    print(f"数据形状: {len(calibration_data)} x {calibration_data[0].shape if calibration_data else 'N/A'}")
+    if len(valid_image_paths) == 0:
+        print("错误: 没有找到有效的校准图片!")
+        return None
 
-    return calibration_data
+    print(f"\n找到 {len(valid_image_paths)} 张有效校准图片")
+
+    # 保存为txt文件（RKNN需要）
+    dataset_txt_path = 'calibration_dataset.txt'
+    with open(dataset_txt_path, 'w') as f:
+        for img_path in valid_image_paths:
+            f.write(img_path + '\n')
+
+    print(f"校准数据集列表已保存到: {dataset_txt_path}")
+
+    return dataset_txt_path
 
 
 def convert_onnx_to_rknn(onnx_path, rknn_path, dataset_path, label_file,
@@ -130,23 +140,39 @@ def convert_onnx_to_rknn(onnx_path, rknn_path, dataset_path, label_file,
     print(f"量化策略: {'INT8量化' if do_quantization else '不量化'}")
     print(f"{'='*60}\n")
 
+    # 初始化变量
+    dataset_txt_path = None
+
     # 创建RKNN对象
     rknn = RKNN(verbose=True)
 
     # 1. 配置模型
     print("步骤 1/5: 配置RKNN模型参数...")
-    ret = rknn.config(
-        target_platform='rk3568',          # 目标平台：RK3568
-        quantized_dtype='asymmetric_quantized-u8' if do_quantization else 'float16',  # 量化类型
-        optimization_level=3,               # 优化级别 (0-3)
-        output_optimize=1,                  # 输出优化
-        # 预处理配置：匹配MobileFaceNet的输入要求
-        # 输入：RGB图像，[0-255]
-        # 归一化：(pixel/255 - 0.5) / 0.5 = (pixel - 127.5) / 127.5
-        mean_values=[[127.5, 127.5, 127.5]],  # 均值
-        std_values=[[127.5, 127.5, 127.5]],   # 标准差
-        # quant_img_RGB2BGR=False,          # 不需要RGB转BGR（已经是RGB）
-    )
+
+    # rknn-toolkit2 v2.3.2 使用新的量化类型命名
+    # w8a8: 权重8位 + 激活8位 (INT8量化)
+    # w8a16: 权重8位 + 激活16位 (混合精度)
+    if do_quantization:
+        ret = rknn.config(
+            target_platform='rk3568',          # 目标平台：RK3568
+            quantized_dtype='w8a8',            # INT8量化：权重8位 + 激活8位
+            optimization_level=3,              # 优化级别 (0-3)
+            output_optimize=True,              # 输出优化（布尔值）
+            # 预处理配置：匹配MobileFaceNet的输入要求
+            # 输入：RGB图像，[0-255]
+            # 归一化：(pixel/255 - 0.5) / 0.5 = (pixel - 127.5) / 127.5
+            mean_values=[[127.5, 127.5, 127.5]],  # 均值
+            std_values=[[127.5, 127.5, 127.5]],   # 标准差
+        )
+    else:
+        # 不量化时不指定 quantized_dtype
+        ret = rknn.config(
+            target_platform='rk3568',
+            optimization_level=3,
+            output_optimize=True,
+            mean_values=[[127.5, 127.5, 127.5]],
+            std_values=[[127.5, 127.5, 127.5]],
+        )
 
     if ret != 0:
         print('配置RKNN失败!')
@@ -155,7 +181,12 @@ def convert_onnx_to_rknn(onnx_path, rknn_path, dataset_path, label_file,
 
     # 2. 加载ONNX模型
     print("\n步骤 2/5: 加载ONNX模型...")
-    ret = rknn.load_onnx(model=onnx_path)
+    # 指定输入形状（RKNN不支持动态batch_size）
+    ret = rknn.load_onnx(
+        model=onnx_path,
+        inputs=['input'],                    # 输入名称
+        input_size_list=[[1, 3, 112, 112]]  # 固定batch_size=1
+    )
     if ret != 0:
         print('加载ONNX模型失败!')
         return False
@@ -165,25 +196,25 @@ def convert_onnx_to_rknn(onnx_path, rknn_path, dataset_path, label_file,
     print("\n步骤 3/5: 构建RKNN模型...")
 
     if do_quantization:
-        # 加载量化校准数据
-        print("\n加载量化校准数据集...")
-        calibration_data = load_calibration_data(
+        # 准备量化校准数据集
+        print("\n准备量化校准数据集...")
+        dataset_txt_path = load_calibration_data(
             dataset_path,
             label_file,
             max_images=max_calib_images
         )
 
-        if calibration_data is None or len(calibration_data) == 0:
-            print("错误: 无法加载校准数据集!")
+        if dataset_txt_path is None:
+            print("错误: 无法准备校准数据集!")
             return False
 
-        print(f"\n开始量化（使用 {len(calibration_data)} 张图片）...")
+        print(f"\n开始量化（校准数据集: {dataset_txt_path}）...")
         print("这可能需要几分钟时间，请耐心等待...")
 
-        # 构建模型并量化
+        # 构建模型并量化（传递txt文件路径）
         ret = rknn.build(
             do_quantization=True,
-            dataset=calibration_data  # 直接传递numpy数组列表
+            dataset=dataset_txt_path  # 传递txt文件路径
         )
     else:
         # 不量化
@@ -205,17 +236,26 @@ def convert_onnx_to_rknn(onnx_path, rknn_path, dataset_path, label_file,
     # 5. 精度分析（可选）
     print("\n步骤 5/5: 进行精度分析...")
     try:
-        # 使用部分校准数据进行精度测试
-        if do_quantization and calibration_data:
-            test_data = calibration_data[:5]  # 使用前5张图片测试
+        # 尝试初始化运行时（仅在RK3568设备上有效）
+        if do_quantization and dataset_txt_path:
+            # 读取几张图片进行测试
+            with open(dataset_txt_path, 'r') as f:
+                test_image_paths = [line.strip() for line in f.readlines()[:5]]
 
             print("  初始化运行时...")
             ret = rknn.init_runtime()
             if ret == 0:
                 print("  运行推理测试...")
-                for i, img in enumerate(test_data):
-                    # 推理
-                    outputs = rknn.inference(inputs=[img])
+                for i, img_path in enumerate(test_image_paths):
+                    # 读取图片
+                    img = cv2.imread(img_path)
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+                    # 扩展维度到 (1, 112, 112, 3) - 添加 batch 维度
+                    img = np.expand_dims(img, axis=0)
+
+                    # 推理（指定数据格式为 NHWC）
+                    outputs = rknn.inference(inputs=[img], data_format='nhwc')
                     if outputs:
                         output_shape = outputs[0].shape
                         output_range = [outputs[0].min(), outputs[0].max()]
@@ -223,6 +263,8 @@ def convert_onnx_to_rknn(onnx_path, rknn_path, dataset_path, label_file,
                 print("✓ 推理测试成功")
             else:
                 print("⚠ 初始化运行时失败（这在非RK3568设备上是正常的）")
+        else:
+            print("⚠ 跳过精度分析（未使用量化）")
     except Exception as e:
         print(f"⚠ 精度分析跳过: {e}")
 

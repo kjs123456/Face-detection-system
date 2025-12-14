@@ -352,10 +352,7 @@ class ModernTrainer:
             # 训练一个epoch
             self.train_epoch(epoch)
 
-            if epoch % 5 == 0:
-                self.save_model(epoch)
-
-        # 保存最终模型
+        # 只保存最终模型
         self.save_model(self.args.epochs, extra='_final')
 
         print('\n' + '='*60)

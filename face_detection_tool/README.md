@@ -263,7 +263,7 @@ python convert_onnx_to_rknn.py -i mobilefacenet.onnx -o mobilefacenet.rknn \
 
 **Conversion Parameters:**
 - Target Platform: RK3568
-- Quantization: INT8 (asymmetric)
+- Quantization: INT8 (w8a8 - 权重8位 + 激活8位)
 - Optimization Level: 3
 - Preprocessing: RGB, mean=[127.5, 127.5, 127.5], std=[127.5, 127.5, 127.5]
 
@@ -289,8 +289,11 @@ img = cv2.imread('face.jpg')
 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 img = cv2.resize(img, (112, 112))
 
-# Inference
-outputs = rknn.inference(inputs=[img])
+# Add batch dimension: (112, 112, 3) -> (1, 112, 112, 3)
+img = np.expand_dims(img, axis=0)
+
+# Inference (specify NHWC format)
+outputs = rknn.inference(inputs=[img], data_format='nhwc')
 embedding = outputs[0][0]  # 512-dim feature vector
 
 # Compare faces (cosine similarity)
