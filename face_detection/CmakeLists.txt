@@ -1,0 +1,28 @@
+cmake_minimum_required(VERSION 3.10)
+project(FaceRecognition_Core)
+
+set(CMAKE_CXX_STANDARD 14)
+
+# 1. 设置输出路径 (编译好的 .so 会直接生成在项目根目录)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# 2. 包含头文件路径
+include_directories(${CMAKE_SOURCE_DIR}/include)
+include_directories(${CMAKE_SOURCE_DIR}/3rdparty/rknn/include)
+include_directories(${CMAKE_SOURCE_DIR}/3rdparty/opencv/include)
+
+# 3. 指定库文件路径 (链接 ARM64 的库)
+link_directories(${CMAKE_SOURCE_DIR}/3rdparty/rknn/lib)
+link_directories(${CMAKE_SOURCE_DIR}/3rdparty/opencv/lib)
+
+# 4. 生成动态库 (libface_engine.so)
+add_library(face_engine SHARED src/face_engine.cpp)
+
+# 5. 链接依赖库
+# 注意：OpenCV 的库名可能因版本不同略有差异，请检查 3rdparty/opencv/lib 下的实际文件名
+target_link_libraries(face_engine
+    rknnrt
+    opencv_core
+    opencv_imgproc
+    opencv_imgcodecs
+)
